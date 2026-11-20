@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Real-Time Voice Agent</title>
+<style>
+  :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+  body { margin: 0; background: #0d1117; color: #e6edf3; }
+  main { max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.6rem; } .sub { color: #8b949e; margin-top: -.6rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 1rem; margin: 1rem 0; }
+  button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: .7rem 1.1rem; font-size: 1rem; cursor: pointer; }
+  button.danger { background: #da3633; } button:disabled { opacity: .5; cursor: not-allowed; }
+  #log { height: 320px; overflow-y: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+  .ev { padding: 2px 6px; border-left: 2px solid #30363d; } .ev.audio { color: #58a6ff; }
+  .ev.tool_call, .ev.tool_result { color: #d2a8ff; } .ev.interruption { color: #f85149; }
+  .ev.turn_complete, .ev.metrics { color: #3fb950; } .ev.error { color: #f85149; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; } th, td { padding: .35rem .5rem; border-bottom: 1px solid #30363d; text-align: right; }
+  th:first-child, td:first-child { text-align: left; } input { padding: .5rem; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎙️ Real-Time Voice Agent</h1>
+  <p class="sub">Streaming STT → LLM (with tools) → TTS · barge-in · per-stage latency</p>
+  <div class="card">
+    <button id="talk">Hold to talk</button>
+    <button id="barge" class="danger" disabled>Barge in (stop)</button>
+    <input id="text" placeholder="or type a message (push-to-text)" size="40" />
+    <button id="send">Send</button>
+    <span id="status">disconnected</span>
+  </div>
+  <div class="card"><div id="log"></div></div>
+  <div class="card"><h3>Latency (ms)</h3><table id="lat"><tbody><tr><td>No turns yet</td></tr></tbody></table></div>
+</main>
+<script>
+let ws, sid, ctx, stream, recorder, chunks = [];
+const log = document.getElementById('log');
+const status = document.getElementById('status');
+const barge = document.getElementById('barge');
+function line(type, text) {
+  const el = document.createElement('div');
+  el.className = 'ev ' + type;
+  el.textContent = `[${new Date().toISOString().slice(11,23)}] ${type}: ${text}`;
+  log.appendChild(el); log.scrollTop = log.scrollHeight;
+}
+async function connect() {
+  const r = await fetch('/api/session', {method: 'POST'});
+  ({session_id: sid} = await r.json());
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/${sid}`);
+  ws.onopen = () => { status.textContent = 'connected · ' + sid; };
+  ws.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'llm_token' || ev.type === 'partial_transcript') {
+      const last = log.lastElementChild;
+      if (last && last.dataset.stream === ev.type) last.textContent += ev.payload.text;
+      else { line(ev.type, ev.payload.text); log.lastElementChild.dataset.stream = ev.type; }
+    } else if (ev.type === 'audio') {
+      line('audio', ev.payload.audio_b64.length + ' b64 bytes');
+    } else if (ev.type === 'metrics') {
+      const t = ev.payload.latency.stages;
+      document.getElementById('lat').innerHTML = '<tbody>' +
+        Object.entries(t).map(([k,v]) => `<tr><td>${k}</td><td>${v.p50_ms}</td><td>${v.p95_ms}</td><td>${v.count}</td></tr>`).join('') + '</tbody>';
+      line('metrics', 'turn complete');
+    } else if (ev.type !== 'session_start') {
+      line(ev.type, JSON.stringify(ev.payload));
+    }
+  };
+}
+const send = obj => ws && ws.readyState === 1 && ws.send(JSON.stringify(obj));
+document.getElementById('send').onclick = () => {
+  const text = document.getElementById('text').value.trim();
+  if (text) { send({type:'text', text}); document.getElementById('text').value = ''; }
+};
+document.getElementById('talk').onmousedown = async () => {
+  await connectIfNeeded();
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  const source = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(2048, 1, 1);
+  chunks = [];
+  proc.onaudioprocess = e => {
+    const f = e.inputBuffer.getChannelData(0);
+    const pcm = new Int16Array(f.length);
+    for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, f[i] * 32768));
+    chunks.push(btoa(String.fromCharCode(...new Uint8Array(pcm.buffer))));
+    if (chunks.length >= 5) { send({type:'audio', audio_b64: chunks.join('')}); chunks = []; }
+  };
+  source.connect(proc); proc.connect(ctx.destination);
+  barge.disabled = false;
+};
+document.getElementById('talk').onmouseup = async () => {
+  if (chunks.length) send({type:'audio', audio_b64: chunks.join('')});
+  chunks = [];
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (ctx) await ctx.close();
+  barge.disabled = true;
+};
+barge.onclick = () => send({type:'interrupt'});
+async function connectIfNeeded() { if (!ws || ws.readyState !== 1) await connect(); }
+connect();
+</script>
+</body>
+</html>
