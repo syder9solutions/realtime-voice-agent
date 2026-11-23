@@ -35,7 +35,7 @@ Two comparable architectures are supported through the same pipeline interface:
 ## Quick start
 
 ```bash
-cd .
+cd realtime-voice-agent
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/pytest tests -q          # 16 passed
 .venv/bin/python main.py eval      # 8/8 PASS, exit 0
